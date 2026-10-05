@@ -1,4 +1,6 @@
 import io,json,os,re,hashlib,hmac,secrets
+import httpx
+from datetime import datetime,timezone
 from pathlib import Path
 from fastapi import FastAPI,File,Form,Request,UploadFile,HTTPException
 from fastapi.responses import HTMLResponse,RedirectResponse
@@ -80,9 +82,19 @@ def need(r):
     return u
 def toks(s):return set(re.findall(r"[a-zA-Z0-9+#.]{2,}",(s or "").lower()))
 def score(j,p):
-    d=toks(" ".join(str(j.get(k,"")) for k in ("title","company","location","description")))
-    sk,ro,lo=toks(p["skills"]),toks(p["roles"]),toks(p["locations"])
-    return round(min(100,55*len(sk&d)/max(1,len(sk))+30*len(ro&d)/max(1,len(ro))+(15 if any(x in " ".join(d) for x in lo) or "remote" in d else 0)),1)
+    title=(j.get("title") or "").lower()
+    text=" ".join(str(j.get(k,"")) for k in ("title","company","location","description")).lower()
+    d=toks(text); sk,ro,lo=toks(p["skills"]),toks(p["roles"]),toks(p["locations"])
+    resume=toks(p.get("resume_text",""))
+    skill_hit=len(sk&d)/max(1,len(sk))
+    role_hit=len(ro&d)/max(1,len(ro))
+    resume_hit=len(resume&d)/max(1,len(resume)) if resume else 0
+    location_text=(p.get("locations") or "").lower()
+    location_hit=1 if any(x.strip().lower() in (j.get("location") or "").lower() for x in location_text.split(",")) else 0
+    if "remote" in (j.get("location") or "").lower() or "remote" in text: location_hit=max(location_hit,1)
+    title_bonus=1 if any(x in title for x in [x.strip().lower() for x in (p.get("roles") or "").split(",") if x.strip()]) else 0
+    raw=42*skill_hit+28*role_hit+12*resume_hit+10*location_hit+8*title_bonus
+    return round(min(100,raw),1)
 def resume_text(data,name):
     if name.lower().endswith(".pdf"):return "\n".join((p.extract_text() or "") for p in PdfReader(io.BytesIO(data)).pages)
     if name.lower().endswith(".docx"):return "\n".join(p.text for p in Document(io.BytesIO(data)).paragraphs)
@@ -197,17 +209,75 @@ def upload(r:Request,resume:UploadFile=File(...)):
     run("UPDATE profiles SET resume_text=:t WHERE user_id=:u",{"t":t,"u":u["id"]});run("INSERT INTO resumes(user_id,filename,extracted_text) VALUES(:u,:n,:t)",{"u":u["id"],"n":name,"t":t})
     return RedirectResponse("/profile",303)
 
+def live_jobs(p):
+    """Fetch fresh jobs from public/optional APIs. Sources are normalized into our jobs schema."""
+    roles=[x.strip() for x in (p.get("roles") or "").split(",") if x.strip()]
+    skills=[x.strip() for x in (p.get("skills") or "").split(",") if x.strip()]
+    locations=[x.strip() for x in (p.get("locations") or "").split(",") if x.strip()]
+    queries=list(dict.fromkeys(roles+skills[:5]))[:8]
+    rows=[]
+    headers={"User-Agent":"JobPilot-AI/0.3 (+https://jobpilot-ai-0wsh.onrender.com)"}
+    try:
+        for page_no in range(1,3):
+            data=httpx.get("https://www.arbeitnow.com/api/job-board-api",params={"page":page_no},headers=headers,timeout=12).json()
+            for x in data.get("data",[]):
+                rows.append({"source":"arbeitnow","external_id":str(x.get("slug") or x.get("id") or x.get("url")),
+                    "title":x.get("title",""),"company":x.get("company_name",""),"location":x.get("location",""),
+                    "url":x.get("url",""),"description":x.get("description","")})
+    except Exception:
+        pass
+    try:
+        for q in queries:
+            data=httpx.get("https://remotive.com/api/remote-jobs",params={"search":q,"limit":50},headers=headers,timeout=12).json()
+            for x in data.get("jobs",[]):
+                rows.append({"source":"remotive","external_id":str(x.get("id")),
+                    "title":x.get("title",""),"company":x.get("company_name",""),"location":x.get("candidate_required_location","Remote"),
+                    "url":x.get("url",""),"description":x.get("description","")})
+    except Exception:
+        pass
+    # Optional Adzuna gives strong India/local coverage when credentials are configured.
+    app_id=os.getenv("ADZUNA_APP_ID"); app_key=os.getenv("ADZUNA_APP_KEY")
+    if app_id and app_key:
+        for q in queries[:5]:
+            try:
+                data=httpx.get(f"https://api.adzuna.com/v1/api/jobs/in/search/1",params={
+                    "app_id":app_id,"app_key":app_key,"results_per_page":50,"what":q,
+                    "content-type":"application/json","sort_by":"date"},headers=headers,timeout=12).json()
+                for x in data.get("results",[]):
+                    rows.append({"source":"adzuna","external_id":str(x.get("id")),
+                        "title":x.get("title",""),"company":(x.get("company") or {}).get("display_name",""),
+                        "location":(x.get("location") or {}).get("display_name","India"),
+                        "url":x.get("redirect_url",""),"description":x.get("description","")})
+            except Exception:
+                pass
+    # De-duplicate and remove obviously stale/irrelevant records before ranking.
+    seen=set(); out=[]
+    preferred_locations=[x.lower() for x in locations if x.strip()]
+    for j in rows:
+        key=(j["source"],j["external_id"])
+        if key in seen or not j["title"] or not j["url"]: continue
+        seen.add(key)
+        text_blob=(j["title"]+" "+j["description"]+" "+j["location"]).lower()
+        if preferred_locations and not any(loc in text_blob for loc in preferred_locations) and "remote" not in text_blob and "worldwide" not in text_blob:
+            continue
+        j["source"]="live:"+j["source"]
+        out.append(j)
+    return out
+
 def add_jobs(r,rows):
     u=need(r);p=sql("SELECT * FROM profiles WHERE user_id=:u",{"u":u["id"]},True)
     for j in rows:
         j={"source":j.get("source","manual"),"external_id":str(j.get("external_id") or j.get("url") or j.get("title")),"title":j.get("title",""),"company":j.get("company",""),"location":j.get("location",""),"url":j.get("url",""),"description":j.get("description","")}
         old=sql("SELECT id FROM jobs WHERE source=:s AND external_id=:e",{"s":j["source"],"e":j["external_id"]},True)
-        if old:jid=old["id"];run("UPDATE jobs SET title=:t,company=:c,location=:l,url=:url,description=:d WHERE id=:id",{"t":j["title"],"c":j["company"],"l":j["location"],"url":j["url"],"d":j["description"],"id":jid})
+        if old:
+            jid=old["id"]
+            run("UPDATE jobs SET title=:t,company=:c,location=:l,url=:url,description=:d WHERE id=:id",{"t":j["title"],"c":j["company"],"l":j["location"],"url":j["url"],"d":j["description"],"id":jid})
         else:
             run("INSERT INTO jobs(source,external_id,title,company,location,url,description) VALUES(:source,:external_id,:title,:company,:location,:url,:description) ON CONFLICT(source,external_id) DO NOTHING",j)
             jid=sql("SELECT id FROM jobs WHERE source=:s AND external_id=:e",{"s":j["source"],"e":j["external_id"]},True)["id"]
         z=score(j,p)
         run("INSERT INTO job_matches(user_id,job_id,match_score) VALUES(:u,:j,:s) ON CONFLICT(user_id,job_id) DO UPDATE SET match_score=excluded.match_score,matched_at=CURRENT_TIMESTAMP",{"u":u["id"],"j":jid,"s":z})
+
 @app.post("/jobs/import")
 def imp(r:Request,payload:str=Form(...)):
     try:rows=json.loads(payload);assert isinstance(rows,list)
@@ -215,9 +285,15 @@ def imp(r:Request,payload:str=Form(...)):
     add_jobs(r,rows);return RedirectResponse("/",303)
 @app.post("/jobs/refresh")
 def refresh(r:Request,selected_role:str=Form("")):
+    u=need(r)
     if selected_role:
-        u=need(r);run("UPDATE profiles SET roles=:r WHERE user_id=:u",{"r":selected_role,"u":u["id"]})
-    add_jobs(r,[{"source":"demo","external_id":"de-001","title":"Junior Data Engineer","company":"Example Data","location":"Hyderabad / Remote","url":"https://example.com/jobs/data-engineer","description":"Python SQL Snowflake ETL data pipelines AWS entry level analytics"},{"source":"demo","external_id":"de-002","title":"AI/ML Engineer - Fresher","company":"Example AI","location":"Bangalore","url":"https://example.com/jobs/ml","description":"Python machine learning TensorFlow scikit-learn pandas model development entry level"},{"source":"demo","external_id":"de-003","title":"Software Engineer","company":"Example Cloud","location":"Pune","url":"https://example.com/jobs/software","description":"C++ Python SQL REST API cloud software engineering graduate"}]);return RedirectResponse("/",303)
+        run("UPDATE profiles SET roles=:r WHERE user_id=:u",{"r":selected_role,"u":u["id"]})
+    p=sql("SELECT * FROM profiles WHERE user_id=:u",{"u":u["id"]},True)
+    rows=live_jobs(p)
+    if not rows:
+        raise HTTPException(503,"Live job sources are temporarily unavailable. Please try again.")
+    add_jobs(r,rows)
+    return RedirectResponse("/jobs",303)
 @app.post("/applications/{jid}")
 def application(r:Request,jid:int):
     u=need(r);j=sql("SELECT * FROM jobs WHERE id=:j",{"j":jid},True)
