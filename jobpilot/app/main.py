@@ -47,6 +47,23 @@ def init():
             c.execute(text("CREATE TABLE IF NOT EXISTS applications(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER,job_id INTEGER,status TEXT DEFAULT 'prepared',answers TEXT,notes TEXT,created_at TEXT DEFAULT CURRENT_TIMESTAMP,updated_at TEXT DEFAULT CURRENT_TIMESTAMP,UNIQUE(user_id,job_id))"))
 init()
 
+def ensure_apply_workflow_tables():
+    with engine.begin() as c:
+        if URL:
+            c.execute(text("CREATE TABLE IF NOT EXISTS application_events(id SERIAL PRIMARY KEY,user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,job_id INTEGER REFERENCES jobs(id) ON DELETE CASCADE,status TEXT NOT NULL,event_type TEXT NOT NULL,detail TEXT DEFAULT '',requires_approval BOOLEAN DEFAULT FALSE,approved BOOLEAN DEFAULT FALSE,created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP)"))
+        else:
+            c.execute(text("CREATE TABLE IF NOT EXISTS application_events(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER,job_id INTEGER,status TEXT NOT NULL,event_type TEXT NOT NULL,detail TEXT DEFAULT '',requires_approval INTEGER DEFAULT 0,approved INTEGER DEFAULT 0,created_at TEXT DEFAULT CURRENT_TIMESTAMP)"))
+ensure_apply_workflow_tables()
+
+def event(u,j,status,event_type,detail="",approval=False):
+    run("INSERT INTO application_events(user_id,job_id,status,event_type,detail,requires_approval,approved) VALUES(:u,:j,:s,:e,:d,:r,0)",{"u":u,"j":j,"s":status,"e":event_type,"d":detail,"r":1 if approval else 0})
+
+def blocker_type(value):
+    s=(value or "").lower()
+    for kind,terms in [("captcha",("captcha","recaptcha","hcaptcha")),("mfa",("multi-factor","multifactor","mfa","verification code","one-time password","otp")),("assessment",("assessment","coding test","technical test","skills test")),("legal_declaration",("legal declaration","attest","certify","i certify","truthfulness declaration"))]:
+        if any(t in s for t in terms): return kind
+    return None
+
 def ph(p):
     s=secrets.token_bytes(16); k=hashlib.scrypt(p.encode(),salt=s,n=2**14,r=8,p=1); return "scrypt$"+s.hex()+"$"+k.hex()
 def pv(p,e):
@@ -141,7 +158,18 @@ def application(r:Request,jid:int):
     if not j:raise HTTPException(404,"Job not found")
     p=sql("SELECT * FROM profiles WHERE user_id=:u",{"u":u["id"]},True)
     a=json.dumps({"why_this_role":f"I am interested in {j['title']} at {j['company']} because it matches my {p['skills']}.","summary":f"Candidate targeting {p['roles']}."})
-    run("INSERT INTO applications(user_id,job_id,status,answers,notes,updated_at) VALUES(:u,:j,'ready_for_review',:a,:n,CURRENT_TIMESTAMP) ON CONFLICT(user_id,job_id) DO UPDATE SET status='ready_for_review',answers=:a,notes=:n,updated_at=CURRENT_TIMESTAMP",{"u":u["id"],"j":jid,"a":a,"n":"Prepared; external submission needs an authorized job-site connector/browser flow."})
+    run("INSERT INTO applications(user_id,job_id,status,answers,notes,updated_at) VALUES(:u,:j,'queued',:a,:n,CURRENT_TIMESTAMP) ON CONFLICT(user_id,job_id) DO UPDATE SET status='queued',answers=:a,notes=:n,updated_at=CURRENT_TIMESTAMP",{"u":u["id"],"j":jid,"a":a,"n":"Queued for authorized automated submission."})
+    event(u["id"],jid,"queued","application_queued","Application queued for automated submission.")
+    return RedirectResponse("/",303)
+
+@app.post("/applications/{jid}/approval")
+def approve_application(r:Request,jid:int):
+    u=need(r)
+    ev=sql("SELECT id FROM application_events WHERE user_id=:u AND job_id=:j AND requires_approval=1 AND approved=0 ORDER BY id DESC LIMIT 1",{"u":u["id"],"j":jid},True)
+    if not ev:raise HTTPException(404,"No pending approval for this application.")
+    run("UPDATE application_events SET approved=1,status='approved' WHERE id=:id",{"id":ev["id"]})
+    run("UPDATE applications SET status='approved_to_continue',updated_at=CURRENT_TIMESTAMP WHERE user_id=:u AND job_id=:j",{"u":u["id"],"j":jid})
+    event(u["id"],jid,"approved","user_approved","User approved continuation after a required checkpoint.")
     return RedirectResponse("/",303)
 @app.post("/automation/run-now")
 def run_now(r:Request):
