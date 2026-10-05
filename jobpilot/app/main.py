@@ -9,6 +9,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from pypdf import PdfReader
 from docx import Document
 from sqlalchemy import create_engine,text
+from .matcher import match_job
 
 BASE=Path(__file__).resolve().parent
 UPLOADS=BASE.parent/"uploads"; UPLOADS.mkdir(exist_ok=True)
@@ -59,6 +60,24 @@ def ensure_apply_workflow_tables():
             c.execute(text("CREATE TABLE IF NOT EXISTS application_events(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER,job_id INTEGER,status TEXT NOT NULL,event_type TEXT NOT NULL,detail TEXT DEFAULT '',requires_approval INTEGER DEFAULT 0,approved INTEGER DEFAULT 0,created_at TEXT DEFAULT CURRENT_TIMESTAMP)"))
 ensure_apply_workflow_tables()
 
+def ensure_matching_columns():
+    # Portable migrations for existing SQLite/Postgres databases.
+    statements=[
+        "ALTER TABLE jobs ADD COLUMN posted_at TEXT",
+        "ALTER TABLE jobs ADD COLUMN last_seen_at TEXT",
+        "ALTER TABLE job_matches ADD COLUMN ai_score REAL",
+        "ALTER TABLE job_matches ADD COLUMN matched_skills TEXT DEFAULT ''",
+        "ALTER TABLE job_matches ADD COLUMN missing_skills TEXT DEFAULT ''",
+        "ALTER TABLE job_matches ADD COLUMN match_reasons TEXT DEFAULT ''",
+    ]
+    with engine.begin() as c:
+        for stmt in statements:
+            try:
+                c.execute(text(stmt))
+            except Exception:
+                pass
+ensure_matching_columns()
+
 def event(u,j,status,event_type,detail="",approval=False):
     run("INSERT INTO application_events(user_id,job_id,status,event_type,detail,requires_approval,approved) VALUES(:u,:j,:s,:e,:d,:r,0)",{"u":u,"j":j,"s":status,"e":event_type,"d":detail,"r":1 if approval else 0})
 
@@ -81,20 +100,10 @@ def need(r):
     if not u: raise HTTPException(401,"Login required")
     return u
 def toks(s):return set(re.findall(r"[a-zA-Z0-9+#.]{2,}",(s or "").lower()))
+
 def score(j,p):
-    title=(j.get("title") or "").lower()
-    text=" ".join(str(j.get(k,"")) for k in ("title","company","location","description")).lower()
-    d=toks(text); sk,ro,lo=toks(p["skills"]),toks(p["roles"]),toks(p["locations"])
-    resume=toks(p.get("resume_text",""))
-    skill_hit=len(sk&d)/max(1,len(sk))
-    role_hit=len(ro&d)/max(1,len(ro))
-    resume_hit=len(resume&d)/max(1,len(resume)) if resume else 0
-    location_text=(p.get("locations") or "").lower()
-    location_hit=1 if any(x.strip().lower() in (j.get("location") or "").lower() for x in location_text.split(",")) else 0
-    if "remote" in (j.get("location") or "").lower() or "remote" in text: location_hit=max(location_hit,1)
-    title_bonus=1 if any(x in title for x in [x.strip().lower() for x in (p.get("roles") or "").split(",") if x.strip()]) else 0
-    raw=42*skill_hit+28*role_hit+12*resume_hit+10*location_hit+8*title_bonus
-    return round(min(100,raw),1)
+    return match_job(j,p)["score"]
+
 def resume_text(data,name):
     if name.lower().endswith(".pdf"):return "\n".join((p.extract_text() or "") for p in PdfReader(io.BytesIO(data)).pages)
     if name.lower().endswith(".docx"):return "\n".join(p.text for p in Document(io.BytesIO(data)).paragraphs)
@@ -128,7 +137,7 @@ def home(r:Request):
     u=user(r)
     if not u:return RedirectResponse("/login",303)
     p=sql("SELECT * FROM profiles WHERE user_id=:u",{"u":u["id"]},True)
-    jobs=sql("SELECT j.*,COALESCE(m.match_score,0) score FROM jobs j LEFT JOIN job_matches m ON m.job_id=j.id AND m.user_id=:u ORDER BY score DESC,j.id DESC LIMIT 100",{"u":u["id"]})
+    jobs=sql("SELECT j.*,COALESCE(m.ai_score,m.match_score,0) score,COALESCE(m.matched_skills,'') matched_skills,COALESCE(m.missing_skills,'') missing_skills,COALESCE(m.match_reasons,'') match_reasons FROM jobs j LEFT JOIN job_matches m ON m.job_id=j.id AND m.user_id=:u ORDER BY score DESC,j.id DESC LIMIT 100",{"u":u["id"]})
     apps=sql("SELECT a.*,j.title,j.company FROM applications a JOIN jobs j ON j.id=a.job_id WHERE a.user_id=:u ORDER BY a.updated_at DESC LIMIT 100",{"u":u["id"]})
     approvals=sql("SELECT e.*,j.title,j.company FROM application_events e JOIN jobs j ON j.id=e.job_id WHERE e.user_id=:u AND e.requires_approval=1 AND e.approved=0 ORDER BY e.created_at DESC",{"u":u["id"]})
     applied_ids={x["job_id"] for x in apps}
@@ -144,7 +153,7 @@ def dashboard(r:Request):
 @app.get("/jobs",response_class=HTMLResponse)
 def jobs_page(r:Request):
     u=need(r);p=sql("SELECT * FROM profiles WHERE user_id=:u",{"u":u["id"]},True)
-    jobs=sql("SELECT j.*,COALESCE(m.match_score,0) score FROM jobs j LEFT JOIN job_matches m ON m.job_id=j.id AND m.user_id=:u ORDER BY score DESC,j.id DESC LIMIT 100",{"u":u["id"]})
+    jobs=sql("SELECT j.*,COALESCE(m.ai_score,m.match_score,0) score,COALESCE(m.matched_skills,'') matched_skills,COALESCE(m.missing_skills,'') missing_skills,COALESCE(m.match_reasons,'') match_reasons FROM jobs j LEFT JOIN job_matches m ON m.job_id=j.id AND m.user_id=:u ORDER BY score DESC,j.id DESC LIMIT 100",{"u":u["id"]})
     apps=sql("SELECT job_id FROM applications WHERE user_id=:u",{"u":u["id"]})
     applied_ids={x["job_id"] for x in apps}
     role_options=[x.strip() for x in (p["roles"] or "").split(",") if x.strip()]
@@ -223,7 +232,7 @@ def live_jobs(p):
             for x in data.get("data",[]):
                 rows.append({"source":"arbeitnow","external_id":str(x.get("slug") or x.get("id") or x.get("url")),
                     "title":x.get("title",""),"company":x.get("company_name",""),"location":x.get("location",""),
-                    "url":x.get("url",""),"description":x.get("description","")})
+                    "url":x.get("url",""),"description":x.get("description",""),"posted_at":x.get("created_at") or x.get("created")})
     except Exception:
         pass
     try:
@@ -232,7 +241,7 @@ def live_jobs(p):
             for x in data.get("jobs",[]):
                 rows.append({"source":"remotive","external_id":str(x.get("id")),
                     "title":x.get("title",""),"company":x.get("company_name",""),"location":x.get("candidate_required_location","Remote"),
-                    "url":x.get("url",""),"description":x.get("description","")})
+                    "url":x.get("url",""),"description":x.get("description",""),"posted_at":x.get("publication_date")})
     except Exception:
         pass
     # Optional Adzuna gives strong India/local coverage when credentials are configured.
@@ -247,7 +256,7 @@ def live_jobs(p):
                     rows.append({"source":"adzuna","external_id":str(x.get("id")),
                         "title":x.get("title",""),"company":(x.get("company") or {}).get("display_name",""),
                         "location":(x.get("location") or {}).get("display_name","India"),
-                        "url":x.get("redirect_url",""),"description":x.get("description","")})
+                        "url":x.get("redirect_url",""),"description":x.get("description",""),"posted_at":x.get("created")})
             except Exception:
                 pass
     # De-duplicate and remove obviously stale/irrelevant records before ranking.
@@ -266,17 +275,44 @@ def live_jobs(p):
 
 def add_jobs(r,rows):
     u=need(r);p=sql("SELECT * FROM profiles WHERE user_id=:u",{"u":u["id"]},True)
+    now=datetime.now(timezone.utc).isoformat()
     for j in rows:
-        j={"source":j.get("source","manual"),"external_id":str(j.get("external_id") or j.get("url") or j.get("title")),"title":j.get("title",""),"company":j.get("company",""),"location":j.get("location",""),"url":j.get("url",""),"description":j.get("description","")}
+        j={
+            "source":j.get("source","manual"),
+            "external_id":str(j.get("external_id") or j.get("url") or j.get("title")),
+            "title":j.get("title","").strip(),
+            "company":j.get("company","").strip(),
+            "location":j.get("location","").strip(),
+            "url":j.get("url","").strip(),
+            "description":j.get("description","") or "",
+            "posted_at":j.get("posted_at") or "",
+        }
+        if not j["title"] or not j["url"]: continue
         old=sql("SELECT id FROM jobs WHERE source=:s AND external_id=:e",{"s":j["source"],"e":j["external_id"]},True)
         if old:
             jid=old["id"]
-            run("UPDATE jobs SET title=:t,company=:c,location=:l,url=:url,description=:d WHERE id=:id",{"t":j["title"],"c":j["company"],"l":j["location"],"url":j["url"],"d":j["description"],"id":jid})
+            run("""UPDATE jobs SET title=:t,company=:c,location=:l,url=:url,description=:d,
+                    posted_at=COALESCE(NULLIF(:posted_at,''),posted_at),last_seen_at=:seen WHERE id=:id""",
+                {"t":j["title"],"c":j["company"],"l":j["location"],"url":j["url"],"d":j["description"],
+                 "posted_at":j["posted_at"],"seen":now,"id":jid})
         else:
-            run("INSERT INTO jobs(source,external_id,title,company,location,url,description) VALUES(:source,:external_id,:title,:company,:location,:url,:description) ON CONFLICT(source,external_id) DO NOTHING",j)
-            jid=sql("SELECT id FROM jobs WHERE source=:s AND external_id=:e",{"s":j["source"],"e":j["external_id"]},True)["id"]
-        z=score(j,p)
-        run("INSERT INTO job_matches(user_id,job_id,match_score) VALUES(:u,:j,:s) ON CONFLICT(user_id,job_id) DO UPDATE SET match_score=excluded.match_score,matched_at=CURRENT_TIMESTAMP",{"u":u["id"],"j":jid,"s":z})
+            run("""INSERT INTO jobs(source,external_id,title,company,location,url,description,posted_at,last_seen_at)
+                   VALUES(:source,:external_id,:title,:company,:location,:url,:description,:posted_at,:seen)
+                   ON CONFLICT(source,external_id) DO NOTHING""",
+                {**j,"seen":now})
+            row=sql("SELECT id FROM jobs WHERE source=:s AND external_id=:e",{"s":j["source"],"e":j["external_id"]},True)
+            if not row: continue
+            jid=row["id"]
+        result=match_job(j,p)
+        run("""INSERT INTO job_matches(user_id,job_id,match_score,ai_score,matched_skills,missing_skills,match_reasons)
+               VALUES(:u,:j,:s,:s,:ms,:miss,:reasons)
+               ON CONFLICT(user_id,job_id) DO UPDATE SET
+                 match_score=excluded.match_score,ai_score=excluded.ai_score,
+                 matched_skills=excluded.matched_skills,missing_skills=excluded.missing_skills,
+                 match_reasons=excluded.match_reasons,matched_at=CURRENT_TIMESTAMP""",
+            {"u":u["id"],"j":jid,"s":result["score"],
+             "ms":json.dumps(result["matched_skills"]), "miss":json.dumps(result["missing_skills"]),
+             "reasons":json.dumps(result["reasons"])})
 
 @app.post("/jobs/import")
 def imp(r:Request,payload:str=Form(...)):
@@ -333,5 +369,5 @@ def api(r:Request):
     u=need(r);return sql("SELECT j.*,COALESCE(m.match_score,0) score FROM jobs j LEFT JOIN job_matches m ON m.job_id=j.id AND m.user_id=:u ORDER BY score DESC",{"u":u["id"]})
 @app.get("/health")
 def health():
-    try:sql("SELECT 1");return {"status":"ok","version":"0.2.0","database":"connected","multi_user":True,"scheduled_runs_per_day":4}
+    try:sql("SELECT 1");return {"status":"ok","version":"0.3.0","database":"connected","multi_user":True,"max_users":5,"paid_ai_required":False,"scheduled_runs_per_day":4}
     except Exception as e:return {"status":"degraded","detail":str(e)}
