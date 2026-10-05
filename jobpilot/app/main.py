@@ -155,6 +155,8 @@ def imp(r:Request,payload:str=Form(...)):
     add_jobs(r,rows);return RedirectResponse("/",303)
 @app.post("/jobs/refresh")
 def refresh(r:Request,selected_role:str=Form("")):
+    if selected_role:
+        u=need(r);run("UPDATE profiles SET roles=:r WHERE user_id=:u",{"r":selected_role,"u":u["id"]})
     add_jobs(r,[{"source":"demo","external_id":"de-001","title":"Junior Data Engineer","company":"Example Data","location":"Hyderabad / Remote","url":"https://example.com/jobs/data-engineer","description":"Python SQL Snowflake ETL data pipelines AWS entry level analytics"},{"source":"demo","external_id":"de-002","title":"AI/ML Engineer - Fresher","company":"Example AI","location":"Bangalore","url":"https://example.com/jobs/ml","description":"Python machine learning TensorFlow scikit-learn pandas model development entry level"},{"source":"demo","external_id":"de-003","title":"Software Engineer","company":"Example Cloud","location":"Pune","url":"https://example.com/jobs/software","description":"C++ Python SQL REST API cloud software engineering graduate"}]);return RedirectResponse("/",303)
 @app.post("/applications/{jid}")
 def application(r:Request,jid:int):
