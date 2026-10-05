@@ -34,6 +34,7 @@ def init():
         if URL:
             c.execute(text("CREATE TABLE IF NOT EXISTS users(id SERIAL PRIMARY KEY,email TEXT UNIQUE NOT NULL,password_hash TEXT NOT NULL,created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP)"))
             c.execute(text("CREATE TABLE IF NOT EXISTS profiles(user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,name TEXT DEFAULT '',phone TEXT DEFAULT '',roles TEXT DEFAULT '',locations TEXT DEFAULT '',skills TEXT DEFAULT '',min_score INTEGER DEFAULT 70,mode TEXT DEFAULT 'smart',experience TEXT DEFAULT '',work_mode TEXT DEFAULT 'Any',min_salary TEXT DEFAULT '',auto_apply_enabled BOOLEAN DEFAULT FALSE,daily_runs INTEGER DEFAULT 4,resume_text TEXT DEFAULT '')"))
+            c.execute(text("CREATE TABLE IF NOT EXISTS user_settings(user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,theme TEXT DEFAULT 'light',updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP)"))
             c.execute(text("CREATE TABLE IF NOT EXISTS resumes(id SERIAL PRIMARY KEY,user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,filename TEXT,extracted_text TEXT,uploaded_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP)"))
             c.execute(text("CREATE TABLE IF NOT EXISTS jobs(id SERIAL PRIMARY KEY,source TEXT NOT NULL,external_id TEXT NOT NULL,title TEXT,company TEXT,location TEXT,url TEXT,description TEXT,created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,UNIQUE(source,external_id))"))
             c.execute(text("CREATE TABLE IF NOT EXISTS job_matches(user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,job_id INTEGER REFERENCES jobs(id) ON DELETE CASCADE,match_score REAL,matched_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(user_id,job_id))"))
@@ -41,6 +42,7 @@ def init():
         else:
             c.execute(text("CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY AUTOINCREMENT,email TEXT UNIQUE NOT NULL,password_hash TEXT NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP)"))
             c.execute(text("CREATE TABLE IF NOT EXISTS profiles(user_id INTEGER PRIMARY KEY,name TEXT DEFAULT '',phone TEXT DEFAULT '',roles TEXT DEFAULT '',locations TEXT DEFAULT '',skills TEXT DEFAULT '',min_score INTEGER DEFAULT 70,mode TEXT DEFAULT 'smart',experience TEXT DEFAULT '',work_mode TEXT DEFAULT 'Any',min_salary TEXT DEFAULT '',auto_apply_enabled INTEGER DEFAULT 0,daily_runs INTEGER DEFAULT 4,resume_text TEXT DEFAULT '')"))
+            c.execute(text("CREATE TABLE IF NOT EXISTS user_settings(user_id INTEGER PRIMARY KEY,theme TEXT DEFAULT 'light',updated_at TEXT DEFAULT CURRENT_TIMESTAMP)"))
             c.execute(text("CREATE TABLE IF NOT EXISTS resumes(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER,filename TEXT,extracted_text TEXT,uploaded_at TEXT DEFAULT CURRENT_TIMESTAMP)"))
             c.execute(text("CREATE TABLE IF NOT EXISTS jobs(id INTEGER PRIMARY KEY AUTOINCREMENT,source TEXT NOT NULL,external_id TEXT NOT NULL,title TEXT,company TEXT,location TEXT,url TEXT,description TEXT,created_at TEXT DEFAULT CURRENT_TIMESTAMP,UNIQUE(source,external_id))"))
             c.execute(text("CREATE TABLE IF NOT EXISTS job_matches(user_id INTEGER,job_id INTEGER,match_score REAL,matched_at TEXT DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(user_id,job_id))"))
@@ -104,6 +106,7 @@ def reg(r:Request,email:str=Form(...),password:str=Form(...),name:str=Form("")):
     run("INSERT INTO users(email,password_hash) VALUES(:e,:p)",{"e":email,"p":ph(password)})
     uid=sql("SELECT id FROM users WHERE email=:e",{"e":email},True)["id"]
     run("INSERT INTO profiles(user_id,name,roles,locations,skills,daily_runs) VALUES(:u,:n,:r,:l,:s,4)",{"u":uid,"n":name,"r":ROLES,"l":LOCS,"s":SKILLS})
+    run("INSERT INTO user_settings(user_id,theme) VALUES(:u,'light') ON CONFLICT(user_id) DO NOTHING",{"u":uid})
     r.session["uid"]=uid;return RedirectResponse("/",303)
 @app.post("/logout")
 def logout(r:Request):r.session.clear();return RedirectResponse("/login",303)
@@ -119,7 +122,7 @@ def home(r:Request):
     applied_ids={x["job_id"] for x in apps}
     counts={"total":len(apps),"queued":sum(x["status"] in ("queued","approved_to_continue") for x in apps),"interview":sum(x["status"] in ("interview","assessment") for x in apps),"offer":sum(x["status"]=="offer" for x in apps),"rejected":sum(x["status"]=="rejected" for x in apps)}
     role_options=[x.strip() for x in (p["roles"] or "").split(",") if x.strip()]
-    return page(r,"index.html",user=u,profile=p,jobs=jobs,apps=apps,approvals=approvals,applied_ids=applied_ids,counts=counts,role_options=role_options)
+    return page(r,"dashboard.html",user=u,profile=p,jobs=jobs,apps=apps,approvals=approvals,applied_ids=applied_ids,counts=counts,role_options=role_options,settings=sql("SELECT * FROM user_settings WHERE user_id=:u",{"u":u["id"]},True))
 
 
 @app.get("/dashboard",response_class=HTMLResponse)
