@@ -115,7 +115,8 @@ def home(r:Request):
     p=sql("SELECT * FROM profiles WHERE user_id=:u",{"u":u["id"]},True)
     jobs=sql("SELECT j.*,COALESCE(m.match_score,0) score FROM jobs j LEFT JOIN job_matches m ON m.job_id=j.id AND m.user_id=:u ORDER BY score DESC,j.id DESC LIMIT 100",{"u":u["id"]})
     apps=sql("SELECT a.*,j.title,j.company FROM applications a JOIN jobs j ON j.id=a.job_id WHERE a.user_id=:u ORDER BY a.updated_at DESC LIMIT 30",{"u":u["id"]})
-    return page(r,"index.html",user=u,profile=p,jobs=jobs,apps=apps)
+    approvals=sql("SELECT e.*,j.title,j.company FROM application_events e JOIN jobs j ON j.id=e.job_id WHERE e.user_id=:u AND e.requires_approval=1 AND e.approved=0 ORDER BY e.created_at DESC",{"u":u["id"]})
+    return page(r,"index.html",user=u,profile=p,jobs=jobs,apps=apps,approvals=approvals)
 
 @app.post("/profile")
 def profile(r:Request,name:str=Form(""),phone:str=Form(""),roles:str=Form(""),locations:str=Form(""),skills:str=Form(""),min_score:int=Form(70),mode:str=Form("smart"),experience:str=Form(""),work_mode:str=Form("Any"),min_salary:str=Form(""),auto_apply_enabled:str=Form("")):
