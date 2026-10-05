@@ -114,9 +114,12 @@ def home(r:Request):
     if not u:return RedirectResponse("/login",303)
     p=sql("SELECT * FROM profiles WHERE user_id=:u",{"u":u["id"]},True)
     jobs=sql("SELECT j.*,COALESCE(m.match_score,0) score FROM jobs j LEFT JOIN job_matches m ON m.job_id=j.id AND m.user_id=:u ORDER BY score DESC,j.id DESC LIMIT 100",{"u":u["id"]})
-    apps=sql("SELECT a.*,j.title,j.company FROM applications a JOIN jobs j ON j.id=a.job_id WHERE a.user_id=:u ORDER BY a.updated_at DESC LIMIT 30",{"u":u["id"]})
+    apps=sql("SELECT a.*,j.title,j.company FROM applications a JOIN jobs j ON j.id=a.job_id WHERE a.user_id=:u ORDER BY a.updated_at DESC LIMIT 100",{"u":u["id"]})
     approvals=sql("SELECT e.*,j.title,j.company FROM application_events e JOIN jobs j ON j.id=e.job_id WHERE e.user_id=:u AND e.requires_approval=1 AND e.approved=0 ORDER BY e.created_at DESC",{"u":u["id"]})
-    return page(r,"index.html",user=u,profile=p,jobs=jobs,apps=apps,approvals=approvals)
+    applied_ids={x["job_id"] for x in apps}
+    counts={"total":len(apps),"queued":sum(x["status"] in ("queued","approved_to_continue") for x in apps),"interview":sum(x["status"] in ("interview","assessment") for x in apps),"offer":sum(x["status"]=="offer" for x in apps),"rejected":sum(x["status"]=="rejected" for x in apps)}
+    role_options=[x.strip() for x in (p["roles"] or "").split(",") if x.strip()]
+    return page(r,"index.html",user=u,profile=p,jobs=jobs,apps=apps,approvals=approvals,applied_ids=applied_ids,counts=counts,role_options=role_options)
 
 @app.post("/profile")
 def profile(r:Request,name:str=Form(""),phone:str=Form(""),roles:str=Form(""),locations:str=Form(""),skills:str=Form(""),min_score:int=Form(70),mode:str=Form("smart"),experience:str=Form(""),work_mode:str=Form("Any"),min_salary:str=Form(""),auto_apply_enabled:str=Form("")):
@@ -151,7 +154,7 @@ def imp(r:Request,payload:str=Form(...)):
     except:raise HTTPException(400,"JSON must be an array")
     add_jobs(r,rows);return RedirectResponse("/",303)
 @app.post("/jobs/refresh")
-def refresh(r:Request):
+def refresh(r:Request,selected_role:str=Form("")):
     add_jobs(r,[{"source":"demo","external_id":"de-001","title":"Junior Data Engineer","company":"Example Data","location":"Hyderabad / Remote","url":"https://example.com/jobs/data-engineer","description":"Python SQL Snowflake ETL data pipelines AWS entry level analytics"},{"source":"demo","external_id":"de-002","title":"AI/ML Engineer - Fresher","company":"Example AI","location":"Bangalore","url":"https://example.com/jobs/ml","description":"Python machine learning TensorFlow scikit-learn pandas model development entry level"},{"source":"demo","external_id":"de-003","title":"Software Engineer","company":"Example Cloud","location":"Pune","url":"https://example.com/jobs/software","description":"C++ Python SQL REST API cloud software engineering graduate"}]);return RedirectResponse("/",303)
 @app.post("/applications/{jid}")
 def application(r:Request,jid:int):
@@ -173,8 +176,8 @@ def approve_application(r:Request,jid:int):
     event(u["id"],jid,"approved","user_approved","User approved continuation after a required checkpoint.")
     return RedirectResponse("/",303)
 @app.post("/automation/run-now")
-def run_now(r:Request):
-    need(r);refresh(r);return RedirectResponse("/",303)
+def run_now(r:Request,selected_role:str=Form("")):
+    refresh(r,selected_role);return RedirectResponse("/",303)
 @app.get("/api/jobs")
 def api(r:Request):
     u=need(r);return sql("SELECT j.*,COALESCE(m.match_score,0) score FROM jobs j LEFT JOIN job_matches m ON m.job_id=j.id AND m.user_id=:u ORDER BY score DESC",{"u":u["id"]})
