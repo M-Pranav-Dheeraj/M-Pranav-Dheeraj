@@ -18,7 +18,7 @@ URL=os.getenv("DATABASE_URL","")
 if URL.startswith("postgres://"): URL=URL.replace("postgres://","postgresql+psycopg://",1)
 elif URL.startswith("postgresql://"): URL=URL.replace("postgresql://","postgresql+psycopg://",1)
 engine=create_engine(URL or "sqlite:///"+str(BASE.parent/"jobpilot.db"),connect_args={"check_same_thread":False} if not URL else {},pool_pre_ping=True)
-app=FastAPI(title="JobPilot AI",version="0.2.0")
+app=FastAPI(title="JobPilot AI",version="0.3.0")
 app.add_middleware(SessionMiddleware,secret_key=os.getenv("SESSION_SECRET","dev-change-me"),same_site="lax",https_only=os.getenv("ENVIRONMENT")=="production")
 
 ROLES="Data Engineer, Data Analyst, AI/ML Engineer, Software Engineer, Python Developer"
@@ -267,7 +267,11 @@ def live_jobs(p):
         if key in seen or not j["title"] or not j["url"]: continue
         seen.add(key)
         text_blob=(j["title"]+" "+j["description"]+" "+j["location"]).lower()
-        if preferred_locations and not any(loc in text_blob for loc in preferred_locations) and "remote" not in text_blob and "worldwide" not in text_blob:
+        location_aliases={"bangalore":"bengaluru","bengaluru":"bangalore","bombay":"mumbai","mumbai":"bombay","madras":"chennai","new delhi":"delhi"}
+        expanded_locations=set(preferred_locations)
+        for loc in preferred_locations:
+            if loc in location_aliases: expanded_locations.add(location_aliases[loc])
+        if expanded_locations and not any(loc in text_blob for loc in expanded_locations) and "remote" not in text_blob and "worldwide" not in text_blob and "india" not in text_blob:
             continue
         j["source"]="live:"+j["source"]
         out.append(j)
@@ -366,7 +370,7 @@ def run_now(r:Request,selected_role:str=Form("")):
     refresh(r,selected_role);return RedirectResponse("/jobs",303)
 @app.get("/api/jobs")
 def api(r:Request):
-    u=need(r);return sql("SELECT j.*,COALESCE(m.match_score,0) score FROM jobs j LEFT JOIN job_matches m ON m.job_id=j.id AND m.user_id=:u ORDER BY score DESC",{"u":u["id"]})
+    u=need(r);return sql("SELECT j.*,COALESCE(m.ai_score,m.match_score,0) score,COALESCE(m.matched_skills,'') matched_skills,COALESCE(m.missing_skills,'') missing_skills,COALESCE(m.match_reasons,'') match_reasons FROM jobs j LEFT JOIN job_matches m ON m.job_id=j.id AND m.user_id=:u ORDER BY score DESC",{"u":u["id"]})
 @app.get("/health")
 def health():
     try:sql("SELECT 1");return {"status":"ok","version":"0.3.0","database":"connected","multi_user":True,"max_users":5,"paid_ai_required":False,"scheduled_runs_per_day":4}
