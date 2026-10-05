@@ -178,7 +178,7 @@ def match_job(job, profile):
 
     resume=normalize(profile.get("resume_text") or "")
     resume_skills=phrases(resume)
-    resume_ratio=len(matched & resume_skills)/max(1,len(matched)) if matched else 0
+    resume_ratio=len(set(matched) & resume_skills)/max(1,len(matched)) if matched else 0
 
     # Base: 40 skills, 25 role, 12 title, 8 resume, 7 location, 3 work mode, 5 freshness.
     raw=(40*skill_ratio)+(25*role_score)+(12*title_role_bonus)+(8*resume_ratio)+(7*loc)+(3*work)+freshness_bonus(job)-seniority_penalty
