@@ -71,14 +71,14 @@ def resume_text(data,name):
 def page(r,n,**x):return templates.TemplateResponse(request=r,name=n,context=x)
 
 @app.get("/login",response_class=HTMLResponse)
-def lp(r):return page(r,"auth.html",mode="login",error=None)
+def lp(r:Request):return page(r,"auth.html",mode="login",error=None)
 @app.post("/login")
 def li(r:Request,email:str=Form(...),password:str=Form(...)):
     u=sql("SELECT * FROM users WHERE email=:e",{"e":email.strip().lower()},True)
     if not u or not pv(password,u["password_hash"]):return page(r,"auth.html",mode="login",error="Invalid email or password.")
     r.session["uid"]=u["id"];return RedirectResponse("/",303)
 @app.get("/register",response_class=HTMLResponse)
-def rp(r):return page(r,"auth.html",mode="register",error=None)
+def rp(r:Request):return page(r,"auth.html",mode="register",error=None)
 @app.post("/register")
 def reg(r:Request,email:str=Form(...),password:str=Form(...),name:str=Form("")):
     email=email.strip().lower()
