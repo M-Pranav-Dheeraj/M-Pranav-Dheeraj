@@ -166,6 +166,18 @@ def application(r:Request,jid:int):
     event(u["id"],jid,"queued","application_queued","Application queued for automated submission.")
     return RedirectResponse("/",303)
 
+@app.get("/api/job/{jid}/suggestions")
+def suggestions(r:Request,jid:int):
+    u=need(r);j=sql("SELECT * FROM jobs WHERE id=:j",{"j":jid},True);p=sql("SELECT * FROM profiles WHERE user_id=:u",{"u":u["id"]},True)
+    if not j: raise HTTPException(404,"Job not found")
+    desc=(j["description"] or "").lower();skills=[x.strip() for x in (p["skills"] or "").split(",") if x.strip()]
+    missing=[s for s in skills if s.lower() not in desc];tips=[]
+    if missing: tips.append("Consider highlighting: "+", ".join(missing[:5])+" if you have hands-on experience.")
+    if p["experience"] and p["experience"].lower() not in desc: tips.append("Tailor your resume summary to explicitly state "+p["experience"]+".")
+    if j["location"] and p["work_mode"]!="Any" and p["work_mode"].lower() not in j["location"].lower(): tips.append("Check work-mode compatibility before applying.")
+    if not tips: tips.append("Your current profile is broadly aligned; tailor the top 2–3 resume bullets to this job description.")
+    return {"job_id":jid,"suggestions":tips}
+
 @app.post("/applications/{jid}/approval")
 def approve_application(r:Request,jid:int):
     u=need(r)
