@@ -121,10 +121,67 @@ def home(r:Request):
     role_options=[x.strip() for x in (p["roles"] or "").split(",") if x.strip()]
     return page(r,"index.html",user=u,profile=p,jobs=jobs,apps=apps,approvals=approvals,applied_ids=applied_ids,counts=counts,role_options=role_options)
 
+
+@app.get("/dashboard",response_class=HTMLResponse)
+def dashboard(r:Request):
+    return home(r)
+
+@app.get("/jobs",response_class=HTMLResponse)
+def jobs_page(r:Request):
+    u=need(r);p=sql("SELECT * FROM profiles WHERE user_id=:u",{"u":u["id"]},True)
+    jobs=sql("SELECT j.*,COALESCE(m.match_score,0) score FROM jobs j LEFT JOIN job_matches m ON m.job_id=j.id AND m.user_id=:u ORDER BY score DESC,j.id DESC LIMIT 100",{"u":u["id"]})
+    apps=sql("SELECT job_id FROM applications WHERE user_id=:u",{"u":u["id"]})
+    applied_ids={x["job_id"] for x in apps}
+    role_options=[x.strip() for x in (p["roles"] or "").split(",") if x.strip()]
+    settings=sql("SELECT * FROM user_settings WHERE user_id=:u",{"u":u["id"]},True)
+    return page(r,"jobs.html",user=u,profile=p,jobs=jobs,applied_ids=applied_ids,role_options=role_options,settings=settings)
+
+@app.get("/applications",response_class=HTMLResponse)
+def applications_page(r:Request):
+    u=need(r);p=sql("SELECT * FROM profiles WHERE user_id=:u",{"u":u["id"]},True)
+    apps=sql("SELECT a.*,j.title,j.company,j.location,j.url FROM applications a JOIN jobs j ON j.id=a.job_id WHERE a.user_id=:u ORDER BY a.updated_at DESC LIMIT 100",{"u":u["id"]})
+    approvals=sql("SELECT e.*,j.title,j.company FROM application_events e JOIN jobs j ON j.id=e.job_id WHERE e.user_id=:u AND e.requires_approval=1 AND e.approved=0 ORDER BY e.created_at DESC",{"u":u["id"]})
+    counts={"total":len(apps),"queued":sum(x["status"] in ("queued","approved_to_continue") for x in apps),"interview":sum(x["status"] in ("interview","assessment") for x in apps),"offer":sum(x["status"]=="offer" for x in apps),"rejected":sum(x["status"]=="rejected" for x in apps)}
+    settings=sql("SELECT * FROM user_settings WHERE user_id=:u",{"u":u["id"]},True)
+    return page(r,"applications.html",user=u,profile=p,apps=apps,approvals=approvals,counts=counts,settings=settings)
+
+@app.get("/profile",response_class=HTMLResponse)
+def profile_page(r:Request):
+    u=need(r);p=sql("SELECT * FROM profiles WHERE user_id=:u",{"u":u["id"]},True)
+    settings=sql("SELECT * FROM user_settings WHERE user_id=:u",{"u":u["id"]},True)
+    return page(r,"profile.html",user=u,profile=p,settings=settings)
+
+@app.get("/settings",response_class=HTMLResponse)
+def settings_page(r:Request):
+    u=need(r);p=sql("SELECT * FROM profiles WHERE user_id=:u",{"u":u["id"]},True)
+    settings=sql("SELECT * FROM user_settings WHERE user_id=:u",{"u":u["id"]},True)
+    if not settings:
+        run("INSERT INTO user_settings(user_id,theme) VALUES(:u,'light') ON CONFLICT(user_id) DO NOTHING",{"u":u["id"]})
+        settings=sql("SELECT * FROM user_settings WHERE user_id=:u",{"u":u["id"]},True)
+    return page(r,"settings.html",user=u,profile=p,settings=settings)
+
+@app.post("/settings/account")
+def settings_account(r:Request,email:str=Form(...),password:str=Form(""),name:str=Form(""),phone:str=Form("")):
+    u=need(r);email=email.strip().lower()
+    other=sql("SELECT id FROM users WHERE email=:e AND id<>:u",{"e":email,"u":u["id"]},True)
+    if other: raise HTTPException(400,"That email is already in use.")
+    run("UPDATE users SET email=:e WHERE id=:u",{"e":email,"u":u["id"]})
+    run("UPDATE profiles SET name=:n,phone=:p WHERE user_id=:u",{"n":name,"p":phone,"u":u["id"]})
+    if password:
+        if len(password)<8: raise HTTPException(400,"Password must be at least 8 characters.")
+        run("UPDATE users SET password_hash=:p WHERE id=:u",{"p":ph(password),"u":u["id"]})
+    return RedirectResponse("/settings",303)
+
+@app.post("/settings/theme")
+def settings_theme(r:Request,theme:str=Form(...)):
+    u=need(r);theme="dark" if theme=="dark" else "light"
+    run("INSERT INTO user_settings(user_id,theme,updated_at) VALUES(:u,:t,CURRENT_TIMESTAMP) ON CONFLICT(user_id) DO UPDATE SET theme=:t,updated_at=CURRENT_TIMESTAMP",{"u":u["id"],"t":theme})
+    return RedirectResponse("/settings",303)
+
 @app.post("/profile")
 def profile(r:Request,name:str=Form(""),phone:str=Form(""),roles:str=Form(""),locations:str=Form(""),skills:str=Form(""),min_score:int=Form(70),mode:str=Form("smart"),experience:str=Form(""),work_mode:str=Form("Any"),min_salary:str=Form(""),auto_apply_enabled:str=Form("")):
     u=need(r);run("""UPDATE profiles SET name=:n,phone=:p,roles=:r,locations=:l,skills=:s,min_score=:m,mode=:mo,experience=:e,work_mode=:w,min_salary=:sal,auto_apply_enabled=:a,daily_runs=4 WHERE user_id=:u""",{"n":name,"p":phone,"r":roles,"l":locations,"s":skills,"m":max(0,min(100,min_score)),"mo":mode,"e":experience,"w":work_mode,"sal":min_salary,"a":1 if auto_apply_enabled else 0,"u":u["id"]})
-    return RedirectResponse("/",303)
+    return RedirectResponse("/profile",303)
 
 @app.post("/resume")
 def upload(r:Request,resume:UploadFile=File(...)):
@@ -135,7 +192,7 @@ def upload(r:Request,resume:UploadFile=File(...)):
     name=re.sub(r"[^a-zA-Z0-9._-]","_",resume.filename or "resume")
     (UPLOADS/f"user_{u['id']}_{name}").write_bytes(data)
     run("UPDATE profiles SET resume_text=:t WHERE user_id=:u",{"t":t,"u":u["id"]});run("INSERT INTO resumes(user_id,filename,extracted_text) VALUES(:u,:n,:t)",{"u":u["id"],"n":name,"t":t})
-    return RedirectResponse("/",303)
+    return RedirectResponse("/profile",303)
 
 def add_jobs(r,rows):
     u=need(r);p=sql("SELECT * FROM profiles WHERE user_id=:u",{"u":u["id"]},True)
@@ -166,7 +223,7 @@ def application(r:Request,jid:int):
     a=json.dumps({"why_this_role":f"I am interested in {j['title']} at {j['company']} because it matches my {p['skills']}.","summary":f"Candidate targeting {p['roles']}."})
     run("INSERT INTO applications(user_id,job_id,status,answers,notes,updated_at) VALUES(:u,:j,'queued',:a,:n,CURRENT_TIMESTAMP) ON CONFLICT(user_id,job_id) DO UPDATE SET status='queued',answers=:a,notes=:n,updated_at=CURRENT_TIMESTAMP",{"u":u["id"],"j":jid,"a":a,"n":"Queued for authorized automated submission."})
     event(u["id"],jid,"queued","application_queued","Application queued for automated submission.")
-    return RedirectResponse("/",303)
+    return RedirectResponse("/applications",303)
 
 @app.get("/api/job/{jid}/suggestions")
 def suggestions(r:Request,jid:int):
@@ -188,10 +245,10 @@ def approve_application(r:Request,jid:int):
     run("UPDATE application_events SET approved=1,status='approved' WHERE id=:id",{"id":ev["id"]})
     run("UPDATE applications SET status='approved_to_continue',updated_at=CURRENT_TIMESTAMP WHERE user_id=:u AND job_id=:j",{"u":u["id"],"j":jid})
     event(u["id"],jid,"approved","user_approved","User approved continuation after a required checkpoint.")
-    return RedirectResponse("/",303)
+    return RedirectResponse("/applications",303)
 @app.post("/automation/run-now")
 def run_now(r:Request,selected_role:str=Form("")):
-    refresh(r,selected_role);return RedirectResponse("/",303)
+    refresh(r,selected_role);return RedirectResponse("/jobs",303)
 @app.get("/api/jobs")
 def api(r:Request):
     u=need(r);return sql("SELECT j.*,COALESCE(m.match_score,0) score FROM jobs j LEFT JOIN job_matches m ON m.job_id=j.id AND m.user_id=:u ORDER BY score DESC",{"u":u["id"]})
