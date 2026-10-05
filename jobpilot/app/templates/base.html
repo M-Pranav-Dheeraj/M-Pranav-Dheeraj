@@ -43,10 +43,16 @@ body.dark .nav a{color:#625b69}
 body.dark .nav a:hover{background:linear-gradient(90deg,rgba(183,122,242,.18),rgba(183,122,242,.04));color:#17121d;border-color:rgba(183,122,242,.35);box-shadow:inset 0 0 0 1px rgba(183,122,242,.06),0 8px 22px rgba(111,43,176,.10)}
 body.dark .nav a:hover .ico{color:#160c1e}
 body.dark .nav a.active{color:#130b19}
+body.dark .nav a:before{background:transparent}
+body.dark .nav a:hover:before{background:var(--purple)}
+body.dark .nav a.active:before{background:var(--purple)}
+body.dark .nav a:hover .ico{background:rgba(183,122,242,.20);color:#160c1e;box-shadow:0 0 0 4px rgba(183,122,242,.10)}
+body.dark .nav a.active .ico{background:rgba(183,122,242,.24);color:#160c1e}
 body.dark .sidebar-bottom{border-top-color:#e7e1ef}
 body.dark .account{color:#625b69}
-body.dark .side-actions a,body.dark .side-actions button{border-color:#e2dbe8;background:#fff;color:#403847}
-body.dark .side-actions a:hover,body.dark .side-actions button:hover{background:var(--purple);color:#150b1d;border-color:var(--purple)}
+body.dark .side-actions a,body.dark .side-actions button{border-color:#ded7e5;background:transparent;color:#403847}
+body.dark .side-actions a:hover,body.dark .side-actions button:hover{background:var(--purple);color:#150b1d;border-color:var(--purple);box-shadow:0 8px 22px rgba(183,122,242,.25);transform:translateY(-1px)}
+body.dark .side-actions a:focus-visible,body.dark .side-actions button:focus-visible{outline:3px solid rgba(183,122,242,.25);outline-offset:2px}
 </style>
 </head>
 <body class="{{'dark' if settings and settings.theme=='dark' else ''}}">
